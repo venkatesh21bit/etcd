@@ -249,9 +249,10 @@
   </div>
 </div>
 
+<meta id="app-config" data-live-mode="{{ live_mode | tojson | safe }}" />
 <script>
   // Bake the live mode flag from Flask into JS at page load time
-  const LIVE_MODE = {{ live_mode | tojson }};
+  const LIVE_MODE = JSON.parse(document.getElementById('app-config').dataset.liveMode);
 </script>
 <script src="/static/script.js?v=4"></script>
 </body>
