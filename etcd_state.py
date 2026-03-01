@@ -88,21 +88,24 @@ def get_cluster_members() -> List[Dict]:
     if not client:
         return []
     try:
-        members = client.members
+        members = list(client.members)   # materialise the generator
         result  = []
-        # Get cluster status to find the leader
-        status  = client.status()
-        leader_id = status.leader_id if hasattr(status, "leader_id") else None
+        # Get cluster status to find the Raft leader.
+        # etcd3 library: status.leader is the Member object of the current Raft
+        # leader, NOT an integer.  status.leader_id does NOT exist.
+        status        = client.status()
+        leader_member = getattr(status, "leader", None)
+        leader_id     = leader_member.id if leader_member is not None else None
 
         for m in members:
-            is_leader = (m.id == leader_id)
+            is_leader = (leader_id is not None and m.id == leader_id)
             result.append({
                 "node_id": m.name or str(m.id),
                 "member_id": str(m.id),
                 "system":  _infer_system(m.name),
                 "port":    _extract_port(m.client_urls),
                 "role":    "leader" if is_leader else "follower",
-                "term":    status.raft_term if hasattr(status, "raft_term") else 0,
+                "term":    getattr(status, "raft_term", 0),
                 "alive":   True,
             })
         return result
