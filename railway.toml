@@ -1,0 +1,110 @@
+# ═══════════════════════════════════════════════════════
+#  railway.toml  –  Railway deployment configuration
+#
+#  Deploy steps:
+#    1. railway login
+#    2. railway init
+#    3. railway up
+#
+#  Or connect GitHub repo in Railway dashboard and deploy
+#  each service from the same repo using the "Root Directory"
+#  and "Dockerfile" fields per service.
+#
+#  Services in this project:
+#    - etcd-cluster   (Dockerfile.etcd)
+#    - visualiser     (Dockerfile.visualiser)
+#    - client-1       (Dockerfile.client, CLIENT_ID=client-1)
+#    - client-2       (Dockerfile.client, CLIENT_ID=client-2)
+#    - postgres       (Railway PostgreSQL plugin — add via dashboard)
+# ═══════════════════════════════════════════════════════
+
+[build]
+  builder              = "dockerfile"
+
+# ── Service: etcd cluster ────────────────────────────
+[[services]]
+  name       = "etcd-cluster"
+  dockerfile = "Dockerfile.etcd"
+
+  [services.deploy]
+    startCommand  = "goreman -f /Procfile start"
+    restartPolicy = "always"
+
+  [[services.variables]]
+    key   = "RAILWAY_TCP_PROXY_ENABLED"
+    value = "true"
+
+# ── Service: visualiser ──────────────────────────────
+[[services]]
+  name       = "visualiser"
+  dockerfile = "Dockerfile.visualiser"
+
+  [services.deploy]
+    startCommand  = "gunicorn --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 app:app"
+    restartPolicy = "always"
+
+  [[services.variables]]
+    key   = "LIVE_MODE"
+    value = "true"
+  [[services.variables]]
+    key   = "ETCD_HOST"
+    value = "${{etcd-cluster.RAILWAY_TCP_PROXY_DOMAIN}}"
+  [[services.variables]]
+    key   = "ETCD_PORT"
+    value = "${{etcd-cluster.RAILWAY_TCP_PROXY_PORT}}"
+  [[services.variables]]
+    key   = "DATABASE_URL"
+    value = "${{Postgres.DATABASE_URL}}"
+  [[services.variables]]
+    key   = "LEASE_TTL"
+    value = "15"
+
+# ── Service: client-1 ────────────────────────────────
+[[services]]
+  name       = "client-1"
+  dockerfile = "Dockerfile.client"
+
+  [services.deploy]
+    startCommand  = "python client.py"
+    restartPolicy = "always"
+
+  [[services.variables]]
+    key   = "CLIENT_ID"
+    value = "client-1"
+  [[services.variables]]
+    key   = "ETCD_HOST"
+    value = "${{etcd-cluster.RAILWAY_TCP_PROXY_DOMAIN}}"
+  [[services.variables]]
+    key   = "ETCD_PORT"
+    value = "${{etcd-cluster.RAILWAY_TCP_PROXY_PORT}}"
+  [[services.variables]]
+    key   = "DATABASE_URL"
+    value = "${{Postgres.DATABASE_URL}}"
+  [[services.variables]]
+    key   = "LEASE_TTL"
+    value = "15"
+
+# ── Service: client-2 ────────────────────────────────
+[[services]]
+  name       = "client-2"
+  dockerfile = "Dockerfile.client"
+
+  [services.deploy]
+    startCommand  = "python client.py"
+    restartPolicy = "always"
+
+  [[services.variables]]
+    key   = "CLIENT_ID"
+    value = "client-2"
+  [[services.variables]]
+    key   = "ETCD_HOST"
+    value = "${{etcd-cluster.RAILWAY_TCP_PROXY_DOMAIN}}"
+  [[services.variables]]
+    key   = "ETCD_PORT"
+    value = "${{etcd-cluster.RAILWAY_TCP_PROXY_PORT}}"
+  [[services.variables]]
+    key   = "DATABASE_URL"
+    value = "${{Postgres.DATABASE_URL}}"
+  [[services.variables]]
+    key   = "LEASE_TTL"
+    value = "15"

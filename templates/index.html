@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>etcd Leader Election – Workflow Visualiser</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════ HEADER -->
+<header>
+  <div class="header-inner">
+    <div class="header-title">
+      <span class="logo">⬡</span>
+      <div>
+        <h1>etcd Leader Election Visualiser</h1>
+        <p class="subtitle">Raft Consensus · Distributed Lock · PostgreSQL · Python</p>
+      </div>
+    </div>
+    <div class="header-status">
+      {% if live_mode %}
+      <span class="mode-badge live" id="mode-badge">● LIVE</span>
+      {% else %}
+      <span class="mode-badge demo" id="mode-badge">◎ DEMO</span>
+      {% endif %}
+      <span class="conn-badge" id="conn-badge">◌ Connecting…</span>
+    </div>
+    <div class="header-controls">
+      {% if not live_mode %}
+      <button id="btn-start" class="btn btn-green" onclick="startWorkflow()">▶ Run Workflow</button>
+      <button id="btn-reset" class="btn btn-gray"  onclick="resetWorkflow()">↺ Reset</button>
+      {% endif %}
+      <button id="btn-crash" class="btn btn-red hidden" onclick="crashLeader()">💥 Crash Leader</button>
+    </div>
+  </div>
+</header>
+
+<!-- ═══════════════════════════════════════════════════════ PHASE BANNER -->
+<div id="phase-banner" class="phase-banner idle">
+  <span id="phase-icon">◎</span>
+  <span id="phase-title">Idle – Press "Run Workflow" to begin</span>
+  <span id="phase-step"></span>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ PROGRESS STEPS -->
+<div class="progress-bar-wrapper">
+  <div class="progress-steps">
+    <div class="ps-step" id="ps-1">
+      <div class="ps-circle">1</div>
+      <div class="ps-label">Cluster Init</div>
+    </div>
+    <div class="ps-line"></div>
+    <div class="ps-step" id="ps-2">
+      <div class="ps-circle">2</div>
+      <div class="ps-label">Leader Election</div>
+    </div>
+    <div class="ps-line"></div>
+    <div class="ps-step" id="ps-3">
+      <div class="ps-circle">3</div>
+      <div class="ps-label">DB Operation</div>
+    </div>
+    <div class="ps-line"></div>
+    <div class="ps-step" id="ps-4">
+      <div class="ps-circle">4</div>
+      <div class="ps-label">Failure &amp; Recovery</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ MAIN GRID -->
+<main class="grid">
+
+  <!-- ──────────────── ARCHITECTURE DIAGRAM (static) -->
+  <section class="card card-arch span-full">
+    <h2 class="card-title">Architecture Overview</h2>
+    <div class="arch-diagram">
+
+      <!-- System 1 box -->
+      <div class="sys-box sys1" id="sys1-box">
+        <div class="sys-label">System 1 (Ubuntu)</div>
+        <div class="sys-inner">
+          <div class="node-chip etcd-chip" id="chip-etcd-1">
+            <span class="chip-icon">⬡</span>
+            <span>etcd-1</span>
+            <span class="chip-badge" id="badge-etcd-1">FOLLOWER</span>
+          </div>
+          <div class="node-chip etcd-chip" id="chip-etcd-2">
+            <span class="chip-icon">⬡</span>
+            <span>etcd-2</span>
+            <span class="chip-badge" id="badge-etcd-2">FOLLOWER</span>
+          </div>
+          <div class="node-chip client-chip" id="chip-client-1">
+            <span class="chip-icon">🐍</span>
+            <span>Python Client 1</span>
+            <span class="chip-badge" id="badge-client-1">IDLE</span>
+          </div>
+          <div class="node-chip db-chip" id="chip-db">
+            <span class="chip-icon">🐘</span>
+            <span>PostgreSQL :5432</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Centre: network + lock key -->
+      <div class="arch-centre">
+        <div class="net-label">TCP/IP Network</div>
+        <div class="raft-arrows">
+          <div class="arrow-row">
+            <span class="arr">←</span>
+            <span class="arr-label">Raft Replication</span>
+            <span class="arr">→</span>
+          </div>
+        </div>
+        <div class="lock-key-widget" id="lock-widget">
+          <div class="lk-title">Distributed Lock</div>
+          <div class="lk-key"><code>/db/critical_lock</code></div>
+          <div class="lk-held" id="lk-held">— vacant —</div>
+          <div class="lk-ttl" id="lk-ttl"></div>
+        </div>
+        <div class="raft-arrows">
+          <div class="arrow-row">
+            <span class="arr">←</span>
+            <span class="arr-label">Distributed Lock</span>
+            <span class="arr">→</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- System 2 box -->
+      <div class="sys-box sys2" id="sys2-box">
+        <div class="sys-label">System 2 (Ubuntu)</div>
+        <div class="sys-inner">
+          <div class="node-chip etcd-chip" id="chip-etcd-3">
+            <span class="chip-icon">⬡</span>
+            <span>etcd-3</span>
+            <span class="chip-badge" id="badge-etcd-3">FOLLOWER</span>
+          </div>
+          <div class="node-chip client-chip" id="chip-client-2">
+            <span class="chip-icon">🐍</span>
+            <span>Python Client 2</span>
+            <span class="chip-badge" id="badge-client-2">IDLE</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────── etcd NODES TABLE -->
+  <section class="card" id="card-nodes">
+    <h2 class="card-title">etcd Cluster Nodes</h2>
+    <table class="data-table">
+      <thead>
+        <tr><th>Node</th><th>System</th><th>Port</th><th>Term</th><th>Role</th><th>Status</th></tr>
+      </thead>
+      <tbody id="nodes-tbody">
+        <tr><td colspan="6" class="empty-cell">Waiting…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ──────────────── APPLICATION CLIENTS -->
+  <section class="card" id="card-clients">
+    <h2 class="card-title">Application Clients</h2>
+    <div class="client-cards" id="client-cards">
+      <div class="client-card" id="cc-client-1">
+        <div class="cc-header">
+          <span class="cc-icon">🐍</span>
+          <span class="cc-name">client-1</span>
+          <span class="cc-sys">(System1)</span>
+        </div>
+        <div class="cc-role idle" id="cc-role-client-1">IDLE</div>
+        <div class="cc-lock" id="cc-lock-client-1"></div>
+        <div class="cc-actions" id="cc-actions-client-1"></div>
+      </div>
+      <div class="client-card" id="cc-client-2">
+        <div class="cc-header">
+          <span class="cc-icon">🐍</span>
+          <span class="cc-name">client-2</span>
+          <span class="cc-sys">(System2)</span>
+        </div>
+        <div class="cc-role idle" id="cc-role-client-2">IDLE</div>
+        <div class="cc-lock" id="cc-lock-client-2"></div>
+        <div class="cc-actions" id="cc-actions-client-2"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────── DISTRIBUTED LOCK INFO -->
+  <section class="card" id="card-lock">
+    <h2 class="card-title">Distributed Lock State</h2>
+    <div class="lock-detail">
+      <div class="ld-row">
+        <span class="ld-key">Key</span>
+        <span class="ld-val"><code>/db/critical_lock</code></span>
+      </div>
+      <div class="ld-row">
+        <span class="ld-key">Held By</span>
+        <span class="ld-val" id="ld-held-by">—</span>
+      </div>
+      <div class="ld-row">
+        <span class="ld-key">TTL Remaining</span>
+        <span class="ld-val" id="ld-ttl">—</span>
+      </div>
+      <div class="ld-row">
+        <span class="ld-key">Revision</span>
+        <span class="ld-val" id="ld-revision">0</span>
+      </div>
+      <div class="ttl-bar-outer">
+        <div class="ttl-bar-inner" id="ttl-bar"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ──────────────── POSTGRESQL DB WRITES -->
+  <section class="card" id="card-db">
+    <h2 class="card-title">PostgreSQL Write Log</h2>
+    <div id="db-write-log" class="sql-log">
+      <span class="empty-cell">No writes yet…</span>
+    </div>
+  </section>
+
+  <!-- ──────────────── LIVE EVENT LOG -->
+  <section class="card span-full" id="card-log">
+    <h2 class="card-title">Live Event Log <span id="log-count" class="log-count">0 entries</span></h2>
+    <div id="event-log" class="event-log">
+      <span class="empty-cell">Waiting for events…</span>
+    </div>
+  </section>
+
+</main>
+
+<!-- ═══════════════════════════════════════════════════════ LIVE: write counter bar -->
+<div id="write-counter-bar" class="write-counter-bar hidden">
+  <span>Total DB Writes:</span>
+  <span id="write-total" class="write-total">0</span>
+  <span class="write-bar-sep">|</span>
+  <span>Active Leader:</span>
+  <span id="active-leader-label" class="active-leader-label">—</span>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ MODAL: workflow steps -->
+<div id="step-modal" class="modal hidden">
+  <div class="modal-inner">
+    <span id="modal-icon">📌</span>
+    <h3 id="modal-title">Step title</h3>
+    <p  id="modal-desc">Description</p>
+    <button onclick="closeModal()">OK</button>
+  </div>
+</div>
+
+<script>
+  // Bake the live mode flag from Flask into JS at page load time
+  const LIVE_MODE = "{{ live_mode }}" === "True";
+</script>
+<script src="/static/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+# ═══════════════════════════════════════════════════════
+#  Dockerfile.client  –  Python client process
+#  Identical image is used for both client-1 and client-2.
+#  CLIENT_ID env variable distinguishes them at runtime.
+#  Build: docker build -f Dockerfile.client -t etcd-client .
+# ═══════════════════════════════════════════════════════
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY client.py .
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "client.py"]

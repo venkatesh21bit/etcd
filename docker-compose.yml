@@ -1,0 +1,121 @@
+# ═══════════════════════════════════════════════════════
+#  docker-compose.yml  –  Full local stack
+#
+#  Usage:
+#    cp .env.example .env          # fill in values
+#    docker compose up --build -d
+#    docker compose logs -f        # watch all logs
+#
+#  To trigger crash:
+#    Open http://localhost:8000 → click "💥 Crash Leader"
+#
+#  To restart crashed client:
+#    docker compose restart client-1
+# ═══════════════════════════════════════════════════════
+
+version: "3.9"
+
+services:
+
+  # ─── etcd 3-node cluster ──────────────────────────────
+  etcd-cluster:
+    build:
+      context: .
+      dockerfile: Dockerfile.etcd
+    container_name: etcd-cluster
+    ports:
+      - "2379:2379"   # node1 client  (primary)
+      - "2381:2381"   # node2 client  (optional)
+      - "2383:2383"   # node3 client  (optional)
+    volumes:
+      - etcd-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://localhost:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── PostgreSQL ───────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: etcd-postgres
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB:       ${POSTGRES_DB:-etcd_demo}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── Python client 1  (System 1 replica) ─────────────
+  client-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: etcd-client-1
+    environment:
+      CLIENT_ID:    client-1
+      ETCD_HOST:    etcd-cluster
+      ETCD_PORT:    "2379"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-etcd_demo}
+      LEASE_TTL:    "15"
+    depends_on:
+      etcd-cluster:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Python client 2  (System 2 replica) ─────────────
+  client-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: etcd-client-2
+    environment:
+      CLIENT_ID:    client-2
+      ETCD_HOST:    etcd-cluster
+      ETCD_PORT:    "2379"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-etcd_demo}
+      LEASE_TTL:    "15"
+    depends_on:
+      etcd-cluster:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Flask visualiser ────────────────────────────────
+  visualiser:
+    build:
+      context: .
+      dockerfile: Dockerfile.visualiser
+    container_name: etcd-visualiser
+    ports:
+      - "8000:8000"
+    environment:
+      LIVE_MODE:    "true"
+      ETCD_HOST:    etcd-cluster
+      ETCD_PORT:    "2379"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-etcd_demo}
+      LEASE_TTL:    "15"
+      PORT:         "8000"
+    depends_on:
+      etcd-cluster:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  etcd-data:
+  pg-data:
