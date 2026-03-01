@@ -252,6 +252,18 @@ def follower_watch_loop() -> bool:
     return True so the main loop retries lock acquisition.
     """
     log.info("FOLLOWER: watching %s for leader departure…", LOCK_KEY)
+
+    # CRITICAL: check if key is already gone before starting the watch.
+    # If we lost the race between try_acquire_lock() and here, the key may
+    # have been deleted already — in that case jump straight back to contesting.
+    try:
+        val, _ = _etcd.get(LOCK_KEY)
+        if val is None:
+            log.info("Lock key already vacant — re-contesting immediately")
+            return True
+    except Exception:
+        pass
+
     lock_released = threading.Event()
 
     def _on_event(event):
@@ -286,7 +298,7 @@ def register_presence():
         def _keepalive():
             while not _stop_event.is_set():
                 try:
-                    _etcd.refresh_lease(presence_lease.id)
+                    _etcd.refresh_lease(presence_lease)   # pass Lease object, not .id
                 except Exception:
                     pass
                 _stop_event.wait(20)
