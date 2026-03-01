@@ -26,10 +26,5 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # CRITICAL: single worker so in-process SSE event queue is shared
-CMD ["gunicorn", \
-     "--workers", "1", \
-     "--threads", "4", \
-     "--bind", "0.0.0.0:8000", \
-     "--timeout", "120", \
-     "--keep-alive", "75", \
-     "app:app"]
+# Railway injects $PORT dynamically – use a shell so the variable expands
+CMD ["sh", "-c", "gunicorn --workers 1 --threads 4 --bind 0.0.0.0:${PORT:-8000} --timeout 120 --keep-alive 75 app:app"]
