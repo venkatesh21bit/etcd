@@ -230,9 +230,9 @@ def leader_work_loop(conn):
             except Exception:
                 pass
 
-        # Keepalive — refresh the lease TTL
+        # Keepalive — refresh the lease TTL using the Lease object's own method
         try:
-            _etcd.refresh_lease(_lease)   # pass Lease object, NOT _lease.id
+            _lease.refresh()
         except Exception as exc:
             log.warning("Lease keepalive failed: %s", exc)
             break
@@ -298,7 +298,7 @@ def register_presence():
         def _keepalive():
             while not _stop_event.is_set():
                 try:
-                    _etcd.refresh_lease(presence_lease)   # pass Lease object, not .id
+                    presence_lease.refresh()   # Lease.refresh() is the correct etcd3 API
                 except Exception:
                     pass
                 _stop_event.wait(20)
