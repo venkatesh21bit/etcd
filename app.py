@@ -38,6 +38,7 @@ else:
         return sim.snapshot()
 
 app = Flask(__name__)
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0  # disable static file caching
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "etcd-case-study")
 
 
