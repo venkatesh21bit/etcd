@@ -275,33 +275,41 @@ function renderDB(db) {
     return;
   }
 
-  // Merge write_log (has timestamps + op names) with records (has full SQL)
-  // Both arrays are in the same order; db.write_log may be longer (trimmed by server)
-  const records = db.records || [];
-
-  el.innerHTML = db.write_log.map((line, i) => {
+  el.innerHTML = db.write_log.map(line => {
+    // Expected formats:
+    //  Live:  "[04:14:19] client-1 → order_insert: qty=12 sku=SKU-409 total=$1079.88"
+    //  Sim:   "[04:14:19] client-1 → order_insert  INSERT INTO orders... -- total=$1079.88"
     const parts = line.match(/^\[(\S+)\]\s+(\S+)\s+→\s+(.+)$/);
-    const rec   = records[i];   // may be undefined if only last-5 records returned
-    const sql   = rec ? rec.payload : "";
+    if (!parts) return `<div class="sql-entry"><div class="sql-body">${line}</div></div>`;
 
-    // Strip trailing -- comment from SQL for display
-    const sqlDisplay = sql.replace(/\s*--.*$/, "").trim();
+    const full     = parts[3].trim();
+    const colonIdx = full.indexOf(": ");
+    let opName, detail, comment;
 
-    // Extract the inline comment (the numbers-heavy part) for emphasis
-    const comment = sql.match(/--\s*(.+)$/)?.[1] || "";
-
-    if (parts) {
-      return `<div class="sql-entry">
-        <div class="sql-header">
-          <span class="sql-ts">${parts[1]}</span>
-          <span class="sql-writer">${parts[2]}</span>
-          <span class="sql-cmd">${parts[3]}</span>
-        </div>
-        ${sqlDisplay ? `<div class="sql-body">${sqlDisplay}</div>` : ""}
-        ${comment   ? `<div class="sql-comment">${comment}</div>` : ""}
-      </div>`;
+    if (colonIdx > 0 && colonIdx < 30) {
+      // Live mode: "op_name: detail"
+      opName  = full.slice(0, colonIdx);
+      detail  = full.slice(colonIdx + 2);
+      comment = "";
+    } else {
+      // Sim mode: "op_name  SQL text -- number comment"
+      const spaceIdx = full.search(/\s/);
+      opName  = spaceIdx > 0 ? full.slice(0, spaceIdx) : full;
+      const rest     = full.slice(opName.length).trim();
+      const cmtMatch = rest.match(/--\s*(.+)$/);
+      comment = cmtMatch ? cmtMatch[1].trim() : "";
+      detail  = rest.replace(/\s*--.*$/, "").trim();
     }
-    return `<div class="sql-entry"><span class="sql-body">${line}</span></div>`;
+
+    return `<div class="sql-entry">
+      <div class="sql-header">
+        <span class="sql-ts">${parts[1]}</span>
+        <span class="sql-writer">${parts[2]}</span>
+        <span class="sql-cmd">${opName}</span>
+      </div>
+      ${detail  ? `<div class="sql-body">${detail}</div>`   : ""}
+      ${comment ? `<div class="sql-comment">${comment}</div>` : ""}
+    </div>`;
   }).join("");
   el.scrollTop = el.scrollHeight;
 

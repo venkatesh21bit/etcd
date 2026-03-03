@@ -221,7 +221,7 @@ class SimulationState:
 
     def _db_write(self, client_id: str, payload: str):
         # Payload format: "operation_name   SQL text -- comment"
-        # Split on first whitespace cluster to get op_name vs full SQL
+        # Split on first run of whitespace to get op_name vs full SQL body
         parts    = payload.split(None, 1)
         op_name  = parts[0] if parts else "write"
         sql_body = parts[1].strip() if len(parts) > 1 else payload
@@ -233,10 +233,10 @@ class SimulationState:
             "timestamp": time.strftime("%H:%M:%S"),
         }
         self.db.records.append(entry)
-        # Log line format matches live-mode: "[ts] client → op_name"
-        log_line = f"[{entry['timestamp']}] {client_id} → {op_name}"
+        # Include full sql_body in log line so the frontend can parse detail + comment
+        log_line = f"[{entry['timestamp']}] {client_id} → {op_name}  {sql_body}"
         self.db.write_log.append(log_line)
-        self._log(f"PostgreSQL: {sql_body}")
+        self._log(f"PostgreSQL: {op_name} – {sql_body[:80]}")
         self._emit("db_write", {**entry, "log_line": log_line})
 
     # ── Main workflow ─────────────────────

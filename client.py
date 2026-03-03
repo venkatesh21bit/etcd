@@ -36,6 +36,11 @@ LEASE_TTL    = int(os.environ.get("LEASE_TTL", "15"))
 LOCK_KEY     = "/db/critical_lock"
 SIGNAL_KEY   = f"/signal/crash/{CLIENT_ID}"
 
+# File written at crash time so the restarted process knows to back off
+_CRASH_STAMP = f"/tmp/etcd_crash_{CLIENT_ID}"
+# How long to wait before re-contesting after a crash (gives the other client time to take over)
+CRASH_BACKOFF = LEASE_TTL + 20
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -109,7 +114,8 @@ def watch_crash_signal():
     """
     Watch /signal/crash/<CLIENT_ID> in etcd.
     If the visualiser writes '1' to this key the process exits immediately,
-    simulating a real crash.
+    simulating a real crash.  We first write a crash-stamp file so the
+    restarted process knows to back off before re-contesting.
     """
     log.info("Watching crash signal key: %s", SIGNAL_KEY)
 
@@ -117,7 +123,13 @@ def watch_crash_signal():
         if hasattr(event, "events"):
             for e in event.events:
                 if isinstance(e, etcd3.events.PutEvent):
-                    log.warning("💥 Crash signal received! Exiting NOW.")
+                    log.warning("💥 Crash signal received! Writing backoff stamp and exiting NOW.")
+                    # Write timestamp so the restarted process backs off
+                    try:
+                        with open(_CRASH_STAMP, "w") as f:
+                            f.write(str(time.time()))
+                    except Exception:
+                        pass
                     _stop_event.set()
                     os.kill(os.getpid(), signal.SIGTERM)
 
@@ -190,21 +202,60 @@ def leader_work_loop(conn):
     Exits gracefully when _stop_event is set or lease is lost.
     """
     global _lease
-    counter  = 0
-    ops = [
-        "transaction_begin",
-        "inventory_decrement",
-        "order_insert",
-        "ledger_credit",
-        "transaction_commit",
-    ]
+    counter = 0
+
+    # Ordered write batches – each entry is (short_op_name, detail_string)
+    # detail uses realistic mock numbers so the visualiser looks live
+    import random
+    def _batch():
+        order_id  = random.randint(7800, 7999)
+        skus      = ["SKU-409", "SKU-112", "SKU-774", "SKU-033", "SKU-281"]
+        carriers  = ["FedEx", "UPS", "DHL", "USPS"]
+        methods   = ["wire", "card", "credit", "BNPL"]
+        sku       = random.choice(skus)
+        qty       = random.randint(1, 30)
+        price     = round(random.uniform(19.99, 249.99), 2)
+        total     = round(qty * price, 2)
+        stock_old = random.randint(50, 800)
+        stock_new = stock_old - qty
+        acc_in    = random.randint(1000, 1099)
+        acc_bal   = round(random.uniform(2000, 15000), 2)
+        new_bal   = round(acc_bal - total, 2)
+        tx_id     = random.randint(3000, 3999)
+        po_id     = random.randint(4400, 4499)
+        carrier   = random.choice(carriers)
+        method    = random.choice(methods)
+        tax       = round(total * 0.15, 2)
+        batch_no  = random.randint(30, 99)
+        matched   = random.randint(100, 200)
+        eta_day   = random.randint(5, 28)
+        weight    = round(random.uniform(0.5, 8.0), 1)
+
+        return [
+            ("transaction_begin",    f"BEGIN order_id={order_id} client={CLIENT_ID}"),
+            ("order_insert",         f"INSERT orders id={order_id} sku={sku} qty={qty} unit_price=${price} total=${total}"),
+            ("inventory_decrement",  f"UPDATE inventory sku={sku} stock {stock_old}→{stock_new} reserved=+{qty}"),
+            ("ledger_debit",         f"UPDATE accounts acc=ACC-{acc_in} -{total} balance ${acc_bal}→${new_bal}"),
+            ("shipment_create",      f"INSERT shipments order={order_id} carrier={carrier} weight={weight}kg eta=03-{eta_day:02d}"),
+            ("audit_log",            f"INSERT audit event=order_confirmed order={order_id} amount=${total} tax=${tax}"),
+            ("po_update",            f"UPDATE purchase_orders po={po_id} status=in_transit carrier={carrier}"),
+            ("transaction_commit",   f"COMMIT order={order_id} {qty} units rows=6 ok"),
+        ]
+
+    current_batch = _batch()
     log.info("Starting DB write loop…")
 
     while not _stop_event.is_set():
-        op = ops[counter % len(ops)]
+        # Rotate through batch; regenerate when batch exhausted
+        if counter >= len(current_batch):
+            counter = 0
+            current_batch = _batch()
+
+        op_name, detail = current_batch[counter]
+        operation = f"{op_name}: {detail}"
         counter += 1
 
-        # Verify lock still held (etcd TTL check)
+        # Verify lock still held
         try:
             val, meta = _etcd.get(LOCK_KEY)
             if val is None or val.decode() != CLIENT_ID:
@@ -219,10 +270,10 @@ def leader_work_loop(conn):
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO distributed_ops (written_by, operation) VALUES (%s, %s)",
-                    (CLIENT_ID, op),
+                    (CLIENT_ID, operation),
                 )
             conn.commit()
-            log.info("📝 DB WRITE  %-20s  counter=%d", op, counter)
+            log.info("📝 DB WRITE  %-20s", op_name)
         except Exception as exc:
             log.error("DB write error: %s", exc)
             try:
@@ -334,6 +385,25 @@ def main():
     log.info("  DB     → PostgreSQL")
     log.info("  Lease  → %ds TTL", LEASE_TTL)
     log.info("═══════════════════════════════════════════")
+
+    # ── Post-crash backoff ──────────────────────────────────────────────────
+    # If we were just crash-signalled, wait CRASH_BACKOFF seconds before
+    # re-contesting so the surviving client can take over first.
+    try:
+        if os.path.exists(_CRASH_STAMP):
+            with open(_CRASH_STAMP) as f:
+                crash_ts = float(f.read().strip())
+            elapsed  = time.time() - crash_ts
+            remaining = CRASH_BACKOFF - elapsed
+            if remaining > 0:
+                log.warning(
+                    "⏳ Post-crash backoff: waiting %.0fs before re-contesting "
+                    "(gives the other client time to become leader)…", remaining
+                )
+                time.sleep(remaining)
+            os.remove(_CRASH_STAMP)
+    except Exception:
+        pass
 
     _etcd    = connect_etcd()
     _db_conn = connect_db()
