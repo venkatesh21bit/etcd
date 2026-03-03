@@ -457,18 +457,35 @@ main.grid {
   padding: 10px;
   font-family: var(--font-mono);
   font-size: 0.78rem;
-  max-height: 200px;
+  max-height: 320px;
   overflow-y: auto;
   line-height: 1.8;
 }
 .sql-entry {
-  padding: 2px 0;
+  padding: 4px 0;
   border-bottom: 1px solid #ffffff08;
 }
 .sql-entry:last-child { border-bottom: none; }
-.sql-ts     { color: var(--text-muted); margin-right: 8px; }
-.sql-writer { color: var(--purple); margin-right: 8px; }
-.sql-cmd    { color: var(--green); }
+.sql-header { display: flex; align-items: baseline; gap: 0; }
+.sql-ts      { color: var(--text-muted); margin-right: 8px; }
+.sql-writer  { color: var(--purple); margin-right: 8px; }
+.sql-cmd     { color: var(--green); }
+.sql-body    {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding-left: 4px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.sql-comment {
+  font-size: 0.70rem;
+  color: var(--orange);
+  padding-left: 4px;
+  font-style: italic;
+}
 
 /* ═══════════════ EVENT LOG ═══════════════ */
 .event-log {

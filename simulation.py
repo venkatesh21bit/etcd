@@ -141,7 +141,7 @@ class SimulationState:
             db_data = {
                 "host":      self.db.host,
                 "port":      self.db.port,
-                "records":   self.db.records[-5:],   # last 5
+                "records":   self.db.records[-10:],  # match write_log window
                 "write_log": self.db.write_log[-10:],
             }
             return {
@@ -220,17 +220,24 @@ class SimulationState:
     # ── DB write ─────────────────────────
 
     def _db_write(self, client_id: str, payload: str):
+        # Payload format: "operation_name   SQL text -- comment"
+        # Split on first whitespace cluster to get op_name vs full SQL
+        parts    = payload.split(None, 1)
+        op_name  = parts[0] if parts else "write"
+        sql_body = parts[1].strip() if len(parts) > 1 else payload
         entry = {
             "id":        len(self.db.records) + 1,
             "written_by": client_id,
-            "payload":   payload,
+            "payload":   sql_body,
+            "operation": op_name,
             "timestamp": time.strftime("%H:%M:%S"),
         }
         self.db.records.append(entry)
-        log_line = f"[{entry['timestamp']}] {client_id} → INSERT: {payload}"
+        # Log line format matches live-mode: "[ts] client → op_name"
+        log_line = f"[{entry['timestamp']}] {client_id} → {op_name}"
         self.db.write_log.append(log_line)
-        self._log(f"PostgreSQL: {log_line}")
-        self._emit("db_write", entry)
+        self._log(f"PostgreSQL: {sql_body}")
+        self._emit("db_write", {**entry, "log_line": log_line})
 
     # ── Main workflow ─────────────────────
 
@@ -311,18 +318,52 @@ class SimulationState:
             self._log(f"{winner} holds lock → connecting to PostgreSQL on {self.db.host}:{self.db.port}")
             time.sleep(0.6)
 
-            writes = [
-                "BEGIN TRANSACTION",
-                "INSERT INTO orders(item, qty, ts) VALUES('Widget-A', 50, NOW())",
-                "INSERT INTO inventory(sku, delta) VALUES('WGT-001', -50)",
-                "UPDATE ledger SET balance = balance - 750.00 WHERE account='primary'",
-                "COMMIT",
+            # ── Round 1: New customer order ────────────────────────────────────
+            self._log(f"{winner} → BEGIN TRANSACTION (order #ORD-7821)")
+            batch1 = [
+                "order_insert      INSERT INTO orders(id,sku,qty,unit_price) VALUES(7821,'SKU-409',12,89.99)  -- total $1,079.88",
+                "inventory_decrement  UPDATE inventory SET stock=stock-12, reserved=reserved+12 WHERE sku='SKU-409'  -- stock 847→835",
+                "ledger_debit       UPDATE accounts SET balance=balance-1079.88 WHERE acc_id='ACC-1042'  -- bal $8,320.12→$7,240.24",
+                "shipment_create    INSERT INTO shipments(order_id,carrier,weight_kg,eta) VALUES(7821,'FedEx',3.2,'2026-03-05')",
+                "audit_log          INSERT INTO audit_log(event,order_id,amount,ts) VALUES('order_confirmed',7821,1079.88,NOW())",
             ]
-            for sql in writes:
+            for sql in batch1:
                 self._db_write(winner, sql)
-                time.sleep(0.55)
+                time.sleep(0.45)
+            self._log(f"{winner} → COMMIT  (order #ORD-7821 persisted, 5 rows affected)")
+            time.sleep(0.5)
 
-            self._log(f"{loser} is PASSIVE – no DB writes performed")
+            # ── Round 2: Stock replenishment ───────────────────────────────────
+            self._log(f"{winner} → BEGIN TRANSACTION (stock replenish batch)")
+            batch2 = [
+                "inventory_replenish  UPDATE inventory SET stock=stock+200, reorder_flag=false WHERE sku='SKU-409'  -- stock 835→1035",
+                "inventory_replenish  UPDATE inventory SET stock=stock+150 WHERE sku='SKU-112'  -- stock 43→193",
+                "inventory_replenish  UPDATE inventory SET stock=stock+500 WHERE sku='SKU-774'  -- stock 12→512",
+                "po_close             UPDATE purchase_orders SET status='received', received_at=NOW() WHERE po_id=4419",
+                "warehouse_log        INSERT INTO warehouse_log(zone,action,units,user) VALUES('B7','inbound',850,'system')",
+            ]
+            for sql in batch2:
+                self._db_write(winner, sql)
+                time.sleep(0.45)
+            self._log(f"{winner} → COMMIT  (replenish batch, 3 SKUs updated)")
+            time.sleep(0.5)
+
+            # ── Round 3: Payment settlement ────────────────────────────────────
+            self._log(f"{winner} → BEGIN TRANSACTION (payment settlement TX-3301)")
+            batch3 = [
+                "payment_receive    INSERT INTO payments(tx_id,from_acc,amount,method) VALUES(3301,'ACC-2289',4575.00,'wire')",
+                "ledger_credit      UPDATE accounts SET balance=balance+4575.00 WHERE acc_id='ACC-2289'  -- bal $1,200.00→$5,775.00",
+                "receivables_clear  UPDATE receivables SET status='paid',paid_at=NOW() WHERE inv_id=8843  -- inv $4,575.00",
+                "tax_provision      INSERT INTO tax_ledger(period,amount,type) VALUES('2026-Q1',686.25,'VAT_15pct')",
+                "reconcile_log      INSERT INTO reconcile_log(batch,matched,unmatched,ts) VALUES('B-031',142,0,NOW())",
+            ]
+            for sql in batch3:
+                self._db_write(winner, sql)
+                time.sleep(0.45)
+            self._log(f"{winner} → COMMIT  (TX-3301 settled, receivables cleared)")
+            time.sleep(0.5)
+
+            self._log(f"{loser} is PASSIVE – no DB writes performed (lock not held)")
             self._emit("state_update", self.snapshot())
             time.sleep(1.0)
 
@@ -380,10 +421,18 @@ class SimulationState:
                 self._log(f"{loser} acquired lock (revision {self.lock.revision}) → NEW APPLICATION LEADER")
                 self._emit("lock_acquired", {"winner": loser, "loser": winner,
                                               "lease_ttl": LEASE_TTL})
-                self._log(f"{loser} resumes critical DB writes …")
+                self._log(f"{loser} resumes critical DB writes after failover …")
                 time.sleep(0.4)
-                self._db_write(loser, "INSERT INTO recovery_log(event) VALUES('leader-failover')")
-                self._db_write(loser, "UPDATE system_state SET active_leader='client-2'")
+                recovery_writes = [
+                    "failover_log       INSERT INTO recovery_log(event,prev_leader,new_leader,ts) VALUES('leader_failover','client-1','client-2',NOW())",
+                    "system_state       UPDATE system_state SET active_leader='client-2', failover_count=failover_count+1, last_failover=NOW()",
+                    "order_resume       INSERT INTO orders(id,sku,qty,unit_price) VALUES(7822,'SKU-112',8,149.50)  -- order resumed by client-2",
+                    "inventory_decrement  UPDATE inventory SET stock=stock-8 WHERE sku='SKU-112'  -- stock 193→185",
+                    "audit_log          INSERT INTO audit_log(event,order_id,amount,ts) VALUES('order_confirmed',7822,1196.00,NOW())",
+                ]
+                for sql in recovery_writes:
+                    self._db_write(loser, sql)
+                    time.sleep(0.4)
             self._emit("state_update", self.snapshot())
             time.sleep(0.5)
 

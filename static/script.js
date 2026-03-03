@@ -274,16 +274,34 @@ function renderDB(db) {
     el.innerHTML = '<span class="empty-cell">No writes yet…</span>';
     return;
   }
-  el.innerHTML = db.write_log.map(line => {
+
+  // Merge write_log (has timestamps + op names) with records (has full SQL)
+  // Both arrays are in the same order; db.write_log may be longer (trimmed by server)
+  const records = db.records || [];
+
+  el.innerHTML = db.write_log.map((line, i) => {
     const parts = line.match(/^\[(\S+)\]\s+(\S+)\s+→\s+(.+)$/);
+    const rec   = records[i];   // may be undefined if only last-5 records returned
+    const sql   = rec ? rec.payload : "";
+
+    // Strip trailing -- comment from SQL for display
+    const sqlDisplay = sql.replace(/\s*--.*$/, "").trim();
+
+    // Extract the inline comment (the numbers-heavy part) for emphasis
+    const comment = sql.match(/--\s*(.+)$/)?.[1] || "";
+
     if (parts) {
       return `<div class="sql-entry">
-        <span class="sql-ts">${parts[1]}</span>
-        <span class="sql-writer">${parts[2]}</span>
-        <span class="sql-cmd">${parts[3]}</span>
+        <div class="sql-header">
+          <span class="sql-ts">${parts[1]}</span>
+          <span class="sql-writer">${parts[2]}</span>
+          <span class="sql-cmd">${parts[3]}</span>
+        </div>
+        ${sqlDisplay ? `<div class="sql-body">${sqlDisplay}</div>` : ""}
+        ${comment   ? `<div class="sql-comment">${comment}</div>` : ""}
       </div>`;
     }
-    return `<div class="sql-entry">${line}</div>`;
+    return `<div class="sql-entry"><span class="sql-body">${line}</span></div>`;
   }).join("");
   el.scrollTop = el.scrollHeight;
 
