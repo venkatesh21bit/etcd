@@ -30,7 +30,7 @@ if LIVE_MODE:
     def _snapshot():
         return etcd_state.snapshot()
 else:
-    from simulation import sim, NodeRole, AppClientRole
+    from simulation import sim, NodeRole, AppClientRole, USE_CASES
     log.info("▶  DEMO MODE – using in-memory simulation")
     _event_queue = sim.event_queue
 
@@ -59,13 +59,26 @@ def state():
 
 # ── Demo-only routes ──────────────────────────────────────────────────────────
 
+@app.route("/api/usecases")
+def usecases():
+    """Return available use cases (id, name, icon, description)."""
+    if LIVE_MODE:
+        return jsonify({})
+    result = {k: {"id": v["id"], "name": v["name"], "icon": v["icon"], "description": v["description"]}
+              for k, v in USE_CASES.items()}
+    return jsonify(result)
+
+
 @app.route("/api/start", methods=["POST"])
 def start():
     """Start (or restart) the demo workflow simulation."""
     if LIVE_MODE:
         return jsonify({"status": "noop", "reason": "live mode — clients run independently"})
-    sim.start()
-    return jsonify({"status": "started"})
+    body = request.get_json(silent=True) or {}
+    algorithm = body.get("algorithm", "raft")
+    usecase   = body.get("usecase", "ecommerce_order")
+    sim.start(algorithm=algorithm, usecase=usecase)
+    return jsonify({"status": "started", "algorithm": algorithm, "usecase": usecase})
 
 
 @app.route("/api/reset", methods=["POST"])
@@ -102,7 +115,8 @@ def trigger_failure():
     for cid, c in sim.clients.items():
         if c.has_lock:
             winner = cid
-            loser  = "client-2" if cid == "client-1" else "client-1"
+            others = [oid for oid in sim.clients if oid != cid]
+            loser  = others[0] if others else "client-2"
             break
 
     sim.phase = "failure"

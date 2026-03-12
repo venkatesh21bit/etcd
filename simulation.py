@@ -33,6 +33,73 @@ class AppClientRole(str, Enum):
     LEADER      = "leader"
     FOLLOWER    = "follower"
 
+ALGORITHM_RAFT  = "raft"
+ALGORITHM_BULLY = "bully"
+
+# ── Use-case definitions ──────────────────────────────────────────────────────
+USE_CASES = {
+    "ecommerce_order": {
+        "id": "ecommerce_order", "name": "E-Commerce Order", "icon": "\U0001f6d2",
+        "description": "Place a customer order, deduct inventory, charge payment, and create shipment.",
+        "operations": [
+            "order_insert      INSERT INTO orders(id,cust_id,sku,qty,unit_price) VALUES(8001,'C-419','SKU-309',3,249.99)  -- total $749.97",
+            "inv_decrement     UPDATE inventory SET stock=stock-3, reserved=reserved+3 WHERE sku='SKU-309'  -- stock 312\u2192309",
+            "payment_charge    INSERT INTO payments(tx_id,order_id,amount,method) VALUES(5501,8001,749.97,'CARD-****4521')  -- Visa",
+            "shipment_create   INSERT INTO shipments(order_id,carrier,weight_kg,eta) VALUES(8001,'UPS',1.4,'2026-03-14')  -- 2-day delivery",
+            "audit_log         INSERT INTO audit_log(event,entity_id,amount,ts) VALUES('order_placed',8001,749.97,NOW())",
+        ],
+        "commit_msg": "Order #8001 placed \u2013 5 rows committed",
+    },
+    "bank_transfer": {
+        "id": "bank_transfer", "name": "Bank Transfer", "icon": "\U0001f4b3",
+        "description": "Atomically debit source account, credit destination, and record the wire transfer.",
+        "operations": [
+            "balance_check     SELECT balance FROM accounts WHERE acc_id='ACC-1042'  -- balance $12,400.00 \u2713",
+            "debit_source      UPDATE accounts SET balance=balance-5000.00, tx_count=tx_count+1 WHERE acc_id='ACC-1042'  -- $12,400\u2192$7,400",
+            "credit_dest       UPDATE accounts SET balance=balance+5000.00 WHERE acc_id='ACC-7731'  -- $800\u2192$5,800",
+            "tx_record         INSERT INTO transactions(tx_id,from_acc,to_acc,amount,method) VALUES(9901,'ACC-1042','ACC-7731',5000.00,'wire')",
+            "ledger_entry      INSERT INTO ledger(tx_id,dr_acc,cr_acc,amount,period) VALUES(9901,'ACC-1042','ACC-7731',5000.00,'2026-Q1')",
+        ],
+        "commit_msg": "Wire TX-9901 committed \u2013 $5,000 transferred",
+    },
+    "inventory_restock": {
+        "id": "inventory_restock", "name": "Inventory Restock", "icon": "\U0001f4e6",
+        "description": "Process a supplier delivery: update stock levels, close PO, log warehouse activity.",
+        "operations": [
+            "po_verify         SELECT * FROM purchase_orders WHERE po_id=4419 AND status='pending'  -- PO found \u2713",
+            "stock_update      UPDATE inventory SET stock=stock+500, reorder_flag=false WHERE sku='SKU-774'  -- 12\u2192512",
+            "stock_update      UPDATE inventory SET stock=stock+300 WHERE sku='SKU-112'  -- 43\u2192343",
+            "po_close          UPDATE purchase_orders SET status='received', received_at=NOW() WHERE po_id=4419",
+            "warehouse_log     INSERT INTO warehouse_log(zone,action,units,supplier) VALUES('C4','inbound',800,'SUP-Acme')",
+        ],
+        "commit_msg": "PO-4419 received \u2013 800 units restocked across 2 SKUs",
+    },
+    "user_onboarding": {
+        "id": "user_onboarding", "name": "User Onboarding", "icon": "\U0001f464",
+        "description": "Register new user, assign roles, provision storage quota, and log access creation.",
+        "operations": [
+            "user_create       INSERT INTO users(id,email,name,status) VALUES('U-9921','alice@corp.io','Alice Sharma','active')",
+            "role_assign       INSERT INTO user_roles(user_id,role,granted_by) VALUES('U-9921','engineer','admin')  -- default role",
+            "quota_provision   INSERT INTO quotas(user_id,storage_gb,api_rpm) VALUES('U-9921',100,1000)  -- standard tier",
+            "notify_queue      INSERT INTO notification_queue(user_id,template,status) VALUES('U-9921','welcome_email','queued')",
+            "audit_log         INSERT INTO audit_log(event,entity_id,actor,ts) VALUES('user_created','U-9921','admin',NOW())",
+        ],
+        "commit_msg": "User U-9921 onboarded \u2013 roles, quota, and notifications provisioned",
+    },
+    "analytics_snapshot": {
+        "id": "analytics_snapshot", "name": "Analytics Snapshot", "icon": "\U0001f4ca",
+        "description": "Aggregate daily sales, compute KPI metrics, and persist a dashboard snapshot.",
+        "operations": [
+            "sales_aggregate   INSERT INTO daily_sales(date,sku,units_sold,revenue) SELECT NOW()::date,sku,SUM(qty),SUM(qty*unit_price) FROM orders GROUP BY sku",
+            "kpi_compute       INSERT INTO kpi_metrics(date,metric,value) VALUES(NOW()::date,'daily_revenue',24381.50)  -- +12% DoD",
+            "kpi_compute       INSERT INTO kpi_metrics(date,metric,value) VALUES(NOW()::date,'orders_placed',87)  -- vs 79 yesterday",
+            "snapshot_store    INSERT INTO dashboard_snapshots(ts,rev,orders,gmv) VALUES(NOW(),14,87,24381.50)",
+            "event_publish     INSERT INTO outbox(topic,event_date,gmv,status) VALUES('analytics.daily','2026-03-12',24381.50,'pending')",
+        ],
+        "commit_msg": "Daily analytics snapshot committed \u2013 KPIs and outbox event persisted",
+    },
+}
+
 LOCK_KEY    = "/db/critical_lock"
 LEASE_TTL   = 10          # seconds for demo
 TICK        = 0.5         # simulation tick
@@ -86,6 +153,7 @@ class SimulationState:
         self.clients: Dict[str, AppClient] = {
             "client-1": AppClient("client-1", "System1"),
             "client-2": AppClient("client-2", "System2"),
+            "client-3": AppClient("client-3", "System2"),
         }
         self.lock    = DistributedLock()
         self.db      = PostgresDB()
@@ -96,6 +164,8 @@ class SimulationState:
         self._lock   = threading.Lock()
         self.running = False
         self._thread: Optional[threading.Thread] = None
+        self.selected_algorithm: str = ALGORITHM_RAFT
+        self.selected_usecase:   str = "ecommerce_order"
 
     # ── helpers ──────────────────────────
 
@@ -145,9 +215,12 @@ class SimulationState:
                 "write_log": self.db.write_log[-10:],
             }
             return {
-                "phase":   self.phase,
-                "step":    self.step,
-                "nodes":   nodes,
+                "phase":     self.phase,
+                "step":      self.step,
+                "running":   self.running,
+                "algorithm": self.selected_algorithm,
+                "usecase":   self.selected_usecase,
+                "nodes":     nodes,
                 "clients": clients,
                 "lock":    lock_data,
                 "db":      db_data,
@@ -217,6 +290,161 @@ class SimulationState:
                 self.lock.held_by      = None
                 self.lock.lease_expiry = 0.0
 
+    # ── Raft log replication ──────────────
+
+    def _raft_replicate_logs(self, leader_id: str):
+        """Simulate Raft AppendEntries log replication to all followers."""
+        alive     = [n for n in self.etcd_nodes.values() if n.alive]
+        followers = [n for n in alive if n.node_id != leader_id]
+        node_ids  = [n.node_id for n in alive]
+
+        entries = [
+            f"/cluster/leader-key → {leader_id}",
+            f"/config/lease-ttl → {LEASE_TTL}",
+            "/db/critical_lock → <vacant>",
+        ]
+        self._log("Raft Replication: leader will send AppendEntries RPCs to all followers")
+        for idx, entry in enumerate(entries, start=1):
+            self._log(f"Raft Replication: {leader_id} appends log entry #{idx}: {entry}")
+            self._emit("raft_replicate", {
+                "leader":    leader_id,
+                "entry":     entry,
+                "index":     idx,
+                "phase":     "append",
+                "acks":      [],
+                "committed": False,
+                "nodes":     node_ids,
+            })
+            time.sleep(0.4)
+
+            acks = []
+            for follower in followers:
+                self._log(f"Raft Replication: AppendEntries RPC → {follower.node_id} … ACK ✓")
+                acks.append(follower.node_id)
+                self._emit("raft_replicate", {
+                    "leader":    leader_id,
+                    "entry":     entry,
+                    "index":     idx,
+                    "phase":     "ack",
+                    "acks":      list(acks),
+                    "committed": False,
+                    "nodes":     node_ids,
+                })
+                time.sleep(0.3)
+
+            quorum = len(alive) // 2 + 1
+            if len(acks) + 1 >= quorum:
+                self._log(f"Raft Replication: Entry #{idx} COMMITTED – quorum {len(acks)+1}/{len(alive)} reached ✓")
+                self._emit("raft_replicate", {
+                    "leader":    leader_id,
+                    "entry":     entry,
+                    "index":     idx,
+                    "phase":     "committed",
+                    "acks":      list(acks),
+                    "committed": True,
+                    "nodes":     node_ids,
+                })
+            time.sleep(0.35)
+
+    # ── Raft heartbeats ───────────────────
+
+    def _raft_heartbeats(self, leader_id: str, rounds: int = 3):
+        """Simulate periodic Raft heartbeat (empty AppendEntries) broadcasts."""
+        alive  = [n for n in self.etcd_nodes.values() if n.alive]
+        term   = max(n.term for n in alive) if alive else 0
+        for r in range(1, rounds + 1):
+            self._log(f"Raft Heartbeat #{r}: {leader_id} → AppendEntries(empty) → followers (Term {term})")
+            self._emit("raft_heartbeat", {
+                "leader": leader_id,
+                "term":   term,
+                "round":  r,
+                "total":  rounds,
+                "nodes":  [n.node_id for n in alive],
+            })
+            time.sleep(0.7)
+
+    # ── Bully Algorithm election ──────────────
+
+    def _bully_elect_leader(self):
+        """Simulate the Bully Algorithm leader election."""
+        alive = [n for n in self.etcd_nodes.values() if n.alive]
+        if len(alive) < 1:
+            return None
+
+        def priority(node):
+            return int(node.node_id.split("-")[1])
+
+        alive_sorted = sorted(alive, key=priority)
+        new_term = max(n.term for n in alive) + 1
+        for n in alive:
+            n.term       = new_term
+            n.role       = NodeRole.FOLLOWER
+            n.voted_for  = None
+            n.vote_count = 0
+
+        prio_str = ", ".join(f"{n.node_id}=P{priority(n)}" for n in alive_sorted)
+        self._log(f"Bully: Election started \u2013 node priorities: [{prio_str}]")
+        self._emit("bully_election", {
+            "term":  new_term,
+            "nodes": [{"id": n.node_id, "priority": priority(n)} for n in alive_sorted],
+        })
+        time.sleep(0.5)
+
+        # Each node from lowest to highest sends ELECTION up, receives OK back
+        for i, node in enumerate(alive_sorted[:-1]):
+            node.role = NodeRole.CANDIDATE
+            higher    = alive_sorted[i + 1:]
+            self._log(f"Bully: {node.node_id} (P{priority(node)}) \u2192 ELECTION \u2192 {', '.join(h.node_id for h in higher)}")
+            for h in higher:
+                self._emit("bully_message", {
+                    "from": node.node_id, "to": h.node_id,
+                    "msg_type": "ELECTION", "term": new_term,
+                })
+                time.sleep(0.38)
+            for h in higher:
+                self._log(f"Bully: {h.node_id} (P{priority(h)}) \u2192 OK \u2192 {node.node_id}")
+                self._emit("bully_message", {
+                    "from": h.node_id, "to": node.node_id,
+                    "msg_type": "OK", "term": new_term,
+                })
+                time.sleep(0.3)
+            node.role = NodeRole.FOLLOWER
+            self._log(f"Bully: {node.node_id} steps back \u2013 received OK from higher-priority node")
+            time.sleep(0.25)
+
+        # Highest-priority alive node becomes coordinator
+        coordinator = alive_sorted[-1]
+        coordinator.role = NodeRole.LEADER
+        for n in alive:
+            if n.node_id != coordinator.node_id:
+                n.role = NodeRole.FOLLOWER
+        self._log(f"Bully: {coordinator.node_id} (P{priority(coordinator)}) \u2192 no higher node \u2192 broadcasts COORDINATOR")
+        for n in [x for x in alive_sorted if x.node_id != coordinator.node_id]:
+            self._emit("bully_message", {
+                "from": coordinator.node_id, "to": n.node_id,
+                "msg_type": "COORDINATOR", "term": new_term,
+            })
+            self._log(f"Bully: {coordinator.node_id} \u2192 COORDINATOR \u2192 {n.node_id}")
+            time.sleep(0.35)
+        self._log(f"Bully: {coordinator.node_id} is COORDINATOR (P{priority(coordinator)}, Term {new_term})")
+        self._emit("bully_leader_elected", {
+            "leader":   coordinator.node_id,
+            "term":     new_term,
+            "priority": priority(coordinator),
+        })
+        return coordinator.node_id
+
+    # ── Use-case runner ──────────────────
+
+    def _run_usecase(self, client_id: str, uc: dict):
+        """Execute a use case's operations as a single atomic DB transaction."""
+        self._log(f"{client_id} \u2192 BEGIN TRANSACTION ({uc['name']})")
+        for op in uc.get("operations", []):
+            self._db_write(client_id, op)
+            time.sleep(0.45)
+        self._log(f"{client_id} \u2192 COMMIT  ({uc['commit_msg']})")
+        time.sleep(0.4)
+
     # ── DB write ─────────────────────────
 
     def _db_write(self, client_id: str, payload: str):
@@ -277,6 +505,28 @@ class SimulationState:
             self._emit("state_update", self.snapshot())
             time.sleep(0.8)
 
+            # ── Raft Log Replication ──────────────────────────────
+            self.phase = "replication"
+            self._emit("phase_change", {"phase": self.phase, "step": self.step,
+                                         "title": "Step 1 – Raft Log Replication (AppendEntries)"})
+            self._log("=== Raft Log Replication – AppendEntries RPCs ===")
+            self._log("All writes go through the Raft leader and are replicated to followers before commit")
+            if raft_leader:
+                self._raft_replicate_logs(raft_leader)
+            self._emit("state_update", self.snapshot())
+            time.sleep(0.5)
+
+            # ── Raft Heartbeats ───────────────────────────────────
+            self.phase = "heartbeat"
+            self._emit("phase_change", {"phase": self.phase, "step": self.step,
+                                         "title": "Step 1 – Raft Heartbeat Monitoring"})
+            self._log("=== Raft Heartbeat Broadcast – leader keepalive ===")
+            self._log("Leader sends periodic empty AppendEntries to suppress follower election timeouts")
+            if raft_leader:
+                self._raft_heartbeats(raft_leader, rounds=3)
+            self._emit("state_update", self.snapshot())
+            time.sleep(0.5)
+
             # ── STEP 2 – Application Leader Election ─────────────
             self.phase = "lock"
             self.step  = 2
@@ -292,19 +542,26 @@ class SimulationState:
             time.sleep(0.5)
             self._log("client-2 (System2) issues etcd PUT /db/critical_lock with lease TTL=10s …")
             time.sleep(0.5)
+            self._log("client-3 (System2) issues etcd PUT /db/critical_lock with lease TTL=10s …")
+            time.sleep(0.5)
 
             # Race: client-1 wins (deterministic for demo)
-            winner, loser = "client-1", "client-2"
+            winner       = "client-1"
+            first_loser  = "client-2"
+            second_loser = "client-3"
             acquired = self._acquire_lock(winner)
             if acquired:
-                self.clients[winner].has_lock = True
-                self.clients[winner].role     = AppClientRole.LEADER
-                self.clients[loser].role      = AppClientRole.FOLLOWER
+                self.clients[winner].has_lock       = True
+                self.clients[winner].role           = AppClientRole.LEADER
+                self.clients[first_loser].role      = AppClientRole.FOLLOWER
+                self.clients[second_loser].role     = AppClientRole.FOLLOWER
                 self._log(f"etcd CAS: {winner} successfully acquired lock (revision {self.lock.revision}, TTL {LEASE_TTL}s)")
-                self._log(f"etcd CAS: {loser} lock acquisition FAILED – key already exists")
+                self._log(f"etcd CAS: {first_loser} lock acquisition FAILED – key already exists")
+                self._log(f"etcd CAS: {second_loser} lock acquisition FAILED – key already exists")
                 self._log(f"{winner} → APPLICATION LEADER")
-                self._log(f"{loser}  → APPLICATION FOLLOWER (passive)")
-                self._emit("lock_acquired", {"winner": winner, "loser": loser,
+                self._log(f"{first_loser}  → APPLICATION FOLLOWER (passive)")
+                self._log(f"{second_loser}  → APPLICATION FOLLOWER (passive)")
+                self._emit("lock_acquired", {"winner": winner, "loser": f"{first_loser} and {second_loser}",
                                               "lease_ttl": LEASE_TTL})
             self._emit("state_update", self.snapshot())
             time.sleep(1.0)
@@ -312,58 +569,15 @@ class SimulationState:
             # ── STEP 3 – Critical DB Operation ───────────────────
             self.phase = "db_write"
             self.step  = 3
+            uc = USE_CASES.get(self.selected_usecase, USE_CASES["ecommerce_order"])
             self._emit("phase_change", {"phase": self.phase, "step": self.step,
-                                         "title": "Step 3 – Critical Database Operation"})
-            self._log("=== STEP 3: Critical Database Operation ===")
+                                         "title": f"Step 3 – {uc['icon']} {uc['name']}"})
+            self._log(f"=== STEP 3: {uc['name']} ===")
             self._log(f"{winner} holds lock → connecting to PostgreSQL on {self.db.host}:{self.db.port}")
             time.sleep(0.6)
-
-            # ── Round 1: New customer order ────────────────────────────────────
-            self._log(f"{winner} → BEGIN TRANSACTION (order #ORD-7821)")
-            batch1 = [
-                "order_insert      INSERT INTO orders(id,sku,qty,unit_price) VALUES(7821,'SKU-409',12,89.99)  -- total $1,079.88",
-                "inventory_decrement  UPDATE inventory SET stock=stock-12, reserved=reserved+12 WHERE sku='SKU-409'  -- stock 847→835",
-                "ledger_debit       UPDATE accounts SET balance=balance-1079.88 WHERE acc_id='ACC-1042'  -- bal $8,320.12→$7,240.24",
-                "shipment_create    INSERT INTO shipments(order_id,carrier,weight_kg,eta) VALUES(7821,'FedEx',3.2,'2026-03-05')",
-                "audit_log          INSERT INTO audit_log(event,order_id,amount,ts) VALUES('order_confirmed',7821,1079.88,NOW())",
-            ]
-            for sql in batch1:
-                self._db_write(winner, sql)
-                time.sleep(0.45)
-            self._log(f"{winner} → COMMIT  (order #ORD-7821 persisted, 5 rows affected)")
-            time.sleep(0.5)
-
-            # ── Round 2: Stock replenishment ───────────────────────────────────
-            self._log(f"{winner} → BEGIN TRANSACTION (stock replenish batch)")
-            batch2 = [
-                "inventory_replenish  UPDATE inventory SET stock=stock+200, reorder_flag=false WHERE sku='SKU-409'  -- stock 835→1035",
-                "inventory_replenish  UPDATE inventory SET stock=stock+150 WHERE sku='SKU-112'  -- stock 43→193",
-                "inventory_replenish  UPDATE inventory SET stock=stock+500 WHERE sku='SKU-774'  -- stock 12→512",
-                "po_close             UPDATE purchase_orders SET status='received', received_at=NOW() WHERE po_id=4419",
-                "warehouse_log        INSERT INTO warehouse_log(zone,action,units,user) VALUES('B7','inbound',850,'system')",
-            ]
-            for sql in batch2:
-                self._db_write(winner, sql)
-                time.sleep(0.45)
-            self._log(f"{winner} → COMMIT  (replenish batch, 3 SKUs updated)")
-            time.sleep(0.5)
-
-            # ── Round 3: Payment settlement ────────────────────────────────────
-            self._log(f"{winner} → BEGIN TRANSACTION (payment settlement TX-3301)")
-            batch3 = [
-                "payment_receive    INSERT INTO payments(tx_id,from_acc,amount,method) VALUES(3301,'ACC-2289',4575.00,'wire')",
-                "ledger_credit      UPDATE accounts SET balance=balance+4575.00 WHERE acc_id='ACC-2289'  -- bal $1,200.00→$5,775.00",
-                "receivables_clear  UPDATE receivables SET status='paid',paid_at=NOW() WHERE inv_id=8843  -- inv $4,575.00",
-                "tax_provision      INSERT INTO tax_ledger(period,amount,type) VALUES('2026-Q1',686.25,'VAT_15pct')",
-                "reconcile_log      INSERT INTO reconcile_log(batch,matched,unmatched,ts) VALUES('B-031',142,0,NOW())",
-            ]
-            for sql in batch3:
-                self._db_write(winner, sql)
-                time.sleep(0.45)
-            self._log(f"{winner} → COMMIT  (TX-3301 settled, receivables cleared)")
-            time.sleep(0.5)
-
-            self._log(f"{loser} is PASSIVE – no DB writes performed (lock not held)")
+            self._run_usecase(winner, uc)
+            self._log(f"{first_loser} is PASSIVE – no DB writes performed (lock not held)")
+            self._log(f"{second_loser} is PASSIVE – no DB writes performed (lock not held)")
             self._emit("state_update", self.snapshot())
             time.sleep(1.0)
 
@@ -408,30 +622,34 @@ class SimulationState:
             self._log("etcd-1 rejoined cluster – quorum restored (2/3)")
             time.sleep(0.4)
 
-            new_raft_leader = self._raft_elect_leader()
+            if self.selected_algorithm == ALGORITHM_BULLY:
+                new_raft_leader = self._bully_elect_leader()
+            else:
+                new_raft_leader = self._raft_elect_leader()
             self._emit("state_update", self.snapshot())
             time.sleep(0.5)
 
-            self._log(f"{loser} (System2) detects lock key absent → attempting acquisition …")
+            self._log(f"{first_loser} (System2) detects lock key absent → attempting acquisition …")
+            self._log(f"{second_loser} (System2) also contests lock acquisition …")
             time.sleep(0.5)
-            acquired2 = self._acquire_lock(loser)
+            acquired2 = self._acquire_lock(first_loser)
             if acquired2:
-                self.clients[loser].has_lock = True
-                self.clients[loser].role     = AppClientRole.LEADER
-                self._log(f"{loser} acquired lock (revision {self.lock.revision}) → NEW APPLICATION LEADER")
-                self._emit("lock_acquired", {"winner": loser, "loser": winner,
+                self.clients[first_loser].has_lock  = True
+                self.clients[first_loser].role      = AppClientRole.LEADER
+                self.clients[second_loser].role     = AppClientRole.FOLLOWER
+                self._log(f"{first_loser} acquired lock (revision {self.lock.revision}) → NEW APPLICATION LEADER")
+                self._log(f"{second_loser} lock acquisition failed → remains FOLLOWER")
+                self._emit("lock_acquired", {"winner": first_loser, "loser": f"{winner} and {second_loser}",
                                               "lease_ttl": LEASE_TTL})
-                self._log(f"{loser} resumes critical DB writes after failover …")
+                self._log(f"{first_loser} resumes critical DB writes after failover …")
                 time.sleep(0.4)
+                uc_r = USE_CASES.get(self.selected_usecase, USE_CASES["ecommerce_order"])
                 recovery_writes = [
                     "failover_log       INSERT INTO recovery_log(event,prev_leader,new_leader,ts) VALUES('leader_failover','client-1','client-2',NOW())",
                     "system_state       UPDATE system_state SET active_leader='client-2', failover_count=failover_count+1, last_failover=NOW()",
-                    "order_resume       INSERT INTO orders(id,sku,qty,unit_price) VALUES(7822,'SKU-112',8,149.50)  -- order resumed by client-2",
-                    "inventory_decrement  UPDATE inventory SET stock=stock-8 WHERE sku='SKU-112'  -- stock 193→185",
-                    "audit_log          INSERT INTO audit_log(event,order_id,amount,ts) VALUES('order_confirmed',7822,1196.00,NOW())",
-                ]
+                ] + list(uc_r.get("operations", [])[:3])
                 for sql in recovery_writes:
-                    self._db_write(loser, sql)
+                    self._db_write(first_loser, sql)
                     time.sleep(0.4)
             self._emit("state_update", self.snapshot())
             time.sleep(0.5)
@@ -445,11 +663,12 @@ class SimulationState:
             self.running = False
             self.phase   = "done"
 
-    def start(self):
+    def start(self, algorithm: str = ALGORITHM_RAFT, usecase: str = "ecommerce_order"):
         if self.running:
             return
-        # Reset state
         self.__init__()
+        self.selected_algorithm = algorithm
+        self.selected_usecase   = usecase
         self._thread = threading.Thread(target=self.run_workflow, daemon=True)
         self._thread.start()
 

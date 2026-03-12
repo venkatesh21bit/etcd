@@ -18,6 +18,10 @@ let _totalWrites     = 0;
 let _sseRetries      = 0;
 let _pollTimer       = null;
 let _lastLeader      = null;   // detect leader changes between polls
+let _lastNodes       = {};     // latest etcd node state snapshot
+let _hbCounts        = {};     // nodeId → heartbeats received/sent
+let _selectedAlgorithm = "raft";
+let _selectedUsecase   = "ecommerce_order";
 
 // ─────────────────────────────────────────
 // Polling (replaces SSE – Railway CDN buffers SSE streams)
@@ -74,6 +78,11 @@ function handleEvent(data) {
     case "node_crash":          onCrash(data);            break;
     case "crash_signalled":     onCrashSignalled(data);   break;
     case "db_write":            onDbWrite(data);          break;
+    case "raft_replicate":      onRaftReplicate(data);    break;
+    case "raft_heartbeat":      onRaftHeartbeat(data);    break;
+    case "bully_election":      onBullyElection(data);    break;
+    case "bully_message":       onBullyMessage(data);     break;
+    case "bully_leader_elected":onBullyLeader(data);      break;
     case "workflow_complete":   onComplete(data);         break;
     case "reset":               onReset();                break;
   }
@@ -83,14 +92,17 @@ function handleEvent(data) {
 // Phase banner & progress steps
 // ─────────────────────────────────────────
 const phaseIcons = {
-  idle:      "◎",
-  init:      "⚙",
-  election:  "⚡",
-  lock:      "🔒",
-  db_write:  "🐘",
-  failure:   "⚠",
-  recovery:  "♻",
-  done:      "✓",
+  idle:        "◎",
+  init:        "⚙",
+  election:    "⚡",
+  replication: "📋",
+  heartbeat:   "💓",
+  bully:       "👑",
+  lock:        "🔒",
+  db_write:    "🐘",
+  failure:     "⚠",
+  recovery:    "♻",
+  done:        "✓",
 };
 
 function setPhase(data) {
@@ -124,17 +136,25 @@ function applyState(state) {
   if (state.db)      renderDB(state.db);
   if (state.logs)    renderAllLogs(state.logs);
   if (state.phase)   setPhase({ phase: state.phase, step: state.step, title: phaseTitleMap[state.phase] || state.phase });
+  if (state.algorithm) syncAlgorithmUI(state.algorithm);
+  if (state.usecase)   syncUsecaseUI(state.usecase);
+  // Lock control panel while simulation is running
+  const cp = document.getElementById("control-panel");
+  if (cp) cp.classList.toggle("locked", state.running === true);
 }
 
 const phaseTitleMap = {
-  idle:      "Idle – Press \"Run Workflow\" to begin",
-  init:      "Step 1 – Cluster Initialisation",
-  election:  "Step 1 – Raft Internal Leader Election",
-  lock:      "Step 2 – Application Leader Election (Distributed Lock)",
-  db_write:  "Step 3 – Critical Database Operation",
-  failure:   "Step 4 – Failure Scenario",
-  recovery:  "Step 4 – Recovery & New Leader Election",
-  done:      "Workflow Complete ✓",
+  idle:        "Idle – Press \"Run Workflow\" to begin",
+  init:        "Step 1 – Cluster Initialisation",
+  election:    "Step 1 – Leader Election",
+  replication: "Step 1 – Raft Log Replication (AppendEntries)",
+  heartbeat:   "Step 1 – Raft Heartbeat Monitoring",
+  bully:       "Step 1 – Bully Algorithm Election",
+  lock:        "Step 2 – Application Leader Election (Distributed Lock)",
+  db_write:    "Step 3 – Critical Database Operation",
+  failure:     "Step 4 – Failure Scenario",
+  recovery:    "Step 4 – Recovery & New Leader Election",
+  done:        "Workflow Complete ✓",
 };
 
 // ─────────────────────────────────────────
@@ -143,6 +163,8 @@ const phaseTitleMap = {
 function renderNodes(nodes) {
   const tbody = document.getElementById("nodes-tbody");
   tbody.innerHTML = "";
+
+  _lastNodes = nodes;
 
   Object.values(nodes).forEach(n => {
     const alive     = n.alive;
@@ -364,7 +386,6 @@ function renderAllLogs(logs) {
 // ─────────────────────────────────────────
 function onRaftElection({ term }) {
   appendLog(`⚡ Raft election started – Term ${term}`, "highlight-blue");
-  // Pulse sys1 box
   blinkBorder("sys1-box", "var(--orange)");
   blinkBorder("sys2-box", "var(--orange)");
 }
@@ -372,6 +393,191 @@ function onRaftElection({ term }) {
 function onRaftLeader({ leader, term }) {
   appendLog(`👑 Raft LEADER elected: ${leader} (Term ${term})`, "highlight-green");
   blinkBorder("sys1-box", "var(--green)");
+}
+
+// ─────────────────────────────────────────
+// Bully Algorithm
+// ─────────────────────────────────────────
+function onBullyElection({ term, nodes }) {
+  appendLog(`👑 Bully election started – Term ${term}. Nodes: ${nodes.join(', ')}`, "highlight-blue");
+  blinkBorder("sys1-box", "var(--orange)");
+  blinkBorder("sys2-box", "var(--orange)");
+}
+
+function onBullyMessage({ from, to, msg_type }) {
+  const el = document.getElementById("bully-messages");
+  if (!el) return;
+  const placeholder = el.querySelector(".empty-cell");
+  if (placeholder) placeholder.remove();
+
+  const typeClass = msg_type.toLowerCase();
+  const div = document.createElement("div");
+  div.className = "bully-msg";
+  div.innerHTML = `
+    <span class="bully-from">${from}</span>
+    <span class="bully-arrow">&rarr;</span>
+    <span class="bully-to">${to}</span>
+    <span class="bully-msg-type ${typeClass}">${msg_type}</span>
+  `;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  appendLog(`👑 Bully: ${from} → ${to} [${msg_type}]`, "highlight-blue");
+  flashElement("card-bully");
+}
+
+function onBullyLeader({ leader, term, priority }) {
+  appendLog(`👑 Bully LEADER elected: ${leader} (Priority ${priority}, Term ${term})`, "highlight-green");
+  blinkBorder("sys1-box", "var(--green)");
+  blinkBorder("sys2-box", "var(--green)");
+  showModal("👑", "Bully Algorithm – Leader Elected",
+    `${leader} has the highest priority (P${priority}) and broadcasts COORDINATOR to all nodes in Term ${term}.`);
+}
+
+// ─────────────────────────────────────────
+// Algorithm & Use Case selectors
+// ─────────────────────────────────────────
+function setAlgorithm(algo) {
+  _selectedAlgorithm = algo;
+  syncAlgorithmUI(algo);
+}
+
+function syncAlgorithmUI(algo) {
+  _selectedAlgorithm = algo;
+  document.querySelectorAll(".algo-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.id === `algo-${algo}`);
+  });
+  // Show/hide Raft-specific panels
+  const showRaft = algo === "raft";
+  const cardRepl = document.getElementById("card-replication");
+  const cardHb   = document.getElementById("card-heartbeat");
+  const cardBully = document.getElementById("card-bully");
+  if (cardRepl)  cardRepl.classList.toggle("hidden", !showRaft);
+  if (cardHb)    cardHb.classList.toggle("hidden",   !showRaft);
+  if (cardBully) cardBully.classList.toggle("hidden", showRaft);
+}
+
+function setUsecase(id) {
+  _selectedUsecase = id;
+  syncUsecaseUI(id);
+}
+
+function syncUsecaseUI(id) {
+  _selectedUsecase = id;
+  document.querySelectorAll(".uc-card").forEach(card => {
+    card.classList.toggle("selected", card.dataset.id === id);
+  });
+}
+
+async function loadUsecases() {
+  const grid = document.getElementById("usecase-grid");
+  if (!grid) return;
+  try {
+    const res  = await fetch("/api/usecases");
+    const data = await res.json();
+    grid.innerHTML = "";
+    Object.values(data).forEach(uc => {
+      const btn = document.createElement("button");
+      btn.className   = `uc-card${uc.id === _selectedUsecase ? " selected" : ""}`;
+      btn.dataset.id  = uc.id;
+      btn.onclick     = () => setUsecase(uc.id);
+      btn.innerHTML   = `<span class="uc-icon">${uc.icon}</span><span class="uc-name">${uc.name}</span>`;
+      btn.title       = uc.description;
+      grid.appendChild(btn);
+    });
+  } catch(e) {
+    grid.textContent = "(could not load use cases)";
+  }
+}
+
+// ─────────────────────────────────────────
+// Raft Log Replication
+// ─────────────────────────────────────────
+function onRaftReplicate({ leader, entry, index, phase, acks, committed, nodes }) {
+  const el = document.getElementById("repl-log");
+  if (!el) return;
+  const placeholder = el.querySelector(".empty-cell");
+  if (placeholder) placeholder.remove();
+
+  const entryId = `repl-entry-${index}`;
+  let entryEl = document.getElementById(entryId);
+  if (!entryEl) {
+    entryEl = document.createElement("div");
+    entryEl.id        = entryId;
+    entryEl.className = "repl-entry";
+    el.appendChild(entryEl);
+  }
+
+  const allNodes = (nodes && nodes.length) ? nodes :
+    Object.keys(_lastNodes).filter(k => k.startsWith("etcd"));
+
+  const acksHtml = allNodes.map(nid => {
+    const isLeader = nid === leader;
+    const hasAck   = isLeader || acks.includes(nid);
+    return `<span class="repl-ack ${hasAck ? "acked" : "pending"}" title="${nid}">${nid.replace("etcd-", "e")}</span>`;
+  }).join("");
+
+  entryEl.innerHTML = `
+    <span class="repl-idx">#${index}</span>
+    <code class="repl-key">${entry}</code>
+    <span class="repl-acks">${acksHtml}</span>
+    <span class="repl-status ${committed ? "committed" : "pending"}">${committed ? "✓ COMMITTED" : "⏳ PENDING"}</span>
+  `;
+
+  if (committed) {
+    entryEl.classList.add("is-committed");
+    appendLog(`✓ Log entry #${index} committed (majority quorum reached)`, "highlight-green");
+  }
+  el.scrollTop = el.scrollHeight;
+  flashElement("card-replication");
+}
+
+// ─────────────────────────────────────────
+// Raft Heartbeat Monitor
+// ─────────────────────────────────────────
+function onRaftHeartbeat({ leader, term, round, nodes }) {
+  const el = document.getElementById("hb-nodes");
+  if (!el) return;
+  const placeholder = el.querySelector(".empty-cell");
+  if (placeholder) placeholder.remove();
+
+  appendLog(`💓 Heartbeat #${round}: ${leader} → AppendEntries(empty) → followers`, "highlight-blue");
+
+  nodes.forEach(nodeId => {
+    _hbCounts[nodeId] = (_hbCounts[nodeId] || 0) + 1;
+    const count    = _hbCounts[nodeId];
+    const isLeader = nodeId === leader;
+
+    let rowEl = document.getElementById(`hb-${nodeId}`);
+    if (!rowEl) {
+      rowEl = document.createElement("div");
+      rowEl.id        = `hb-${nodeId}`;
+      rowEl.className = "hb-row";
+      el.appendChild(rowEl);
+    }
+
+    // Build beat track – last 5 beats, fading older ones
+    const beats  = Math.min(count, 5);
+    let beatHtml = "";
+    for (let i = 0; i < beats; i++) {
+      const age   = beats - 1 - i;
+      const fresh = i === beats - 1;
+      beatHtml += `<span class="hb-beat${fresh ? " hb-fresh" : ""}" style="opacity:${Math.max(0.15, 1 - age * 0.2)}">${fresh ? "♥" : "·"}</span>`;
+    }
+
+    rowEl.innerHTML = `
+      <span class="hb-node-name">${nodeId}</span>
+      <span class="hb-role-badge ${isLeader ? "hb-leader" : "hb-follower"}">${isLeader ? "LEADER" : "FOLLOWER"}</span>
+      <span class="hb-pulse-track">${beatHtml}</span>
+      <span class="hb-count">${isLeader ? `sent&nbsp;${count}` : `rcvd&nbsp;${count}`}</span>
+    `;
+
+    // Trigger the row glow animation
+    rowEl.classList.remove("hb-active");
+    void rowEl.offsetWidth;  // force reflow
+    rowEl.classList.add("hb-active");
+  });
+
+  flashElement("card-heartbeat");
 }
 
 function onLockAcquired({ winner, loser, lease_ttl }) {
@@ -440,6 +646,7 @@ function onComplete({ message }) {
 
 function onReset() {
   logCount = 0;
+  _hbCounts = {};
   document.getElementById("log-count").textContent = "0 entries";
   document.getElementById("event-log").innerHTML =
     '<span class="empty-cell">Waiting for events…</span>';
@@ -447,6 +654,12 @@ function onReset() {
     '<span class="empty-cell">No writes yet…</span>';
   document.getElementById("nodes-tbody").innerHTML =
     '<tr><td colspan="6" class="empty-cell">Waiting…</td></tr>';
+  document.getElementById("repl-log").innerHTML =
+    '<span class="empty-cell">Waiting for election…</span>';
+  document.getElementById("hb-nodes").innerHTML =
+    '<span class="empty-cell">Waiting for election…</span>';
+  const bullyEl = document.getElementById("bully-messages");
+  if (bullyEl) bullyEl.innerHTML = '<span class="empty-cell">Waiting for election…</span>';
   document.getElementById("sys1-box").classList.remove("crashed");
   // Reset progress
   for (let i = 1; i <= 4; i++) {
@@ -549,7 +762,11 @@ function closeModal() {
 async function startWorkflow() {
   const btn = document.getElementById("btn-start");
   if (btn) btn.disabled = true;
-  await fetch("/api/start", { method: "POST" });
+  await fetch("/api/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ algorithm: _selectedAlgorithm, usecase: _selectedUsecase })
+  });
   setTimeout(() => { if (btn) btn.disabled = false; }, 2000);
 }
 
@@ -608,4 +825,5 @@ setInterval(pollState, 2000);
 // Boot – script is at bottom of <body>, DOM is already ready
 // ─────────────────────────────────────────
 connectSSE();
+loadUsecases();
 fetch("/api/state").then(r => r.json()).then(applyState).catch(() => {});

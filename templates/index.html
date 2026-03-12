@@ -72,6 +72,31 @@
   </div>
 </div>
 
+{% if not live_mode %}
+<!-- ══════════════════════════════════════════════ CONTROL PANEL -->
+<div class="control-panel" id="control-panel">
+  <div class="cp-section">
+    <div class="cp-label">Algorithm</div>
+    <div class="algo-toggle">
+      <button id="algo-raft" class="algo-btn active" onclick="setAlgorithm('raft')">
+        <span class="algo-icon">⬡</span>
+        <span class="algo-name">Raft</span>
+        <span class="algo-desc">Consensus via log replication &amp; heartbeats</span>
+      </button>
+      <button id="algo-bully" class="algo-btn" onclick="setAlgorithm('bully')">
+        <span class="algo-icon">👑</span>
+        <span class="algo-name">Bully</span>
+        <span class="algo-desc">Priority-based leader election</span>
+      </button>
+    </div>
+  </div>
+  <div class="cp-section">
+    <div class="cp-label">Use Case</div>
+    <div class="usecase-grid" id="usecase-grid">Loading…</div>
+  </div>
+</div>
+{% endif %}
+
 <!-- ═══════════════════════════════════════════════════════ MAIN GRID -->
 <main class="grid">
 
@@ -144,8 +169,11 @@
             <span class="chip-icon">🐍</span>
             <span>Python Client 2</span>
             <span class="chip-badge" id="badge-client-2">IDLE</span>
-          </div>
-        </div>
+          </div>          <div class="node-chip client-chip" id="chip-client-3">
+            <span class="chip-icon">🐍</span>
+            <span>Python Client 3</span>
+            <span class="chip-badge" id="badge-client-3">IDLE</span>
+          </div>        </div>
       </div>
     </div>
   </section>
@@ -161,6 +189,48 @@
         <tr><td colspan="6" class="empty-cell">Waiting…</td></tr>
       </tbody>
     </table>
+  </section>
+
+  <!-- ──────────────── RAFT LOG REPLICATION -->
+  <section class="card" id="card-replication">
+    <h2 class="card-title">📋 Raft Log Replication</h2>
+    <p class="panel-desc">
+      All writes flow through the <strong>Raft leader</strong> via <code>AppendEntries</code> RPCs.
+      Once a <strong>majority</strong> of nodes acknowledge, the entry is
+      <span class="text-green">committed</span> and applied to every node's state machine —
+      guaranteeing <strong>strong consistency</strong>.
+    </p>
+    <div id="repl-log" class="repl-log">
+      <span class="empty-cell">Waiting for election…</span>
+    </div>
+  </section>
+
+  <!-- ──────────────── RAFT HEARTBEAT MONITOR -->
+  <section class="card" id="card-heartbeat">
+    <h2 class="card-title">💓 Raft Heartbeat Monitor</h2>
+    <p class="panel-desc">
+      The Raft leader broadcasts periodic empty <code>AppendEntries</code> messages as
+      <strong>heartbeats</strong> to keep followers from starting a new election.
+      If heartbeats stop arriving, a follower's election timeout fires and it becomes a
+      <strong>Candidate</strong>.
+    </p>
+    <div id="hb-nodes" class="hb-nodes">
+      <span class="empty-cell">Waiting for election…</span>
+    </div>
+  </section>
+
+  <!-- ──────────────── BULLY ALGORITHM PANEL -->
+  <section class="card hidden" id="card-bully">
+    <h2 class="card-title">👑 Bully Algorithm Election</h2>
+    <p class="panel-desc">
+      The <strong>Bully Algorithm</strong> elects the node with the highest priority as leader.
+      Lower-priority nodes send <code>ELECTION</code> messages to higher-priority nodes.
+      If a higher node responds with <code>OK</code>, the sender steps down.
+      The surviving highest-priority node broadcasts <code>COORDINATOR</code> to all.
+    </p>
+    <div id="bully-messages" class="bully-msgs">
+      <span class="empty-cell">Waiting for election…</span>
+    </div>
   </section>
 
   <!-- ──────────────── APPLICATION CLIENTS -->
@@ -186,6 +256,16 @@
         <div class="cc-role idle" id="cc-role-client-2">IDLE</div>
         <div class="cc-lock" id="cc-lock-client-2"></div>
         <div class="cc-actions" id="cc-actions-client-2"></div>
+      </div>
+      <div class="client-card" id="cc-client-3">
+        <div class="cc-header">
+          <span class="cc-icon">🐍</span>
+          <span class="cc-name">client-3</span>
+          <span class="cc-sys">(System2)</span>
+        </div>
+        <div class="cc-role idle" id="cc-role-client-3">IDLE</div>
+        <div class="cc-lock" id="cc-lock-client-3"></div>
+        <div class="cc-actions" id="cc-actions-client-3"></div>
       </div>
     </div>
   </section>
@@ -258,6 +338,6 @@
   // Bake the live mode flag from Flask into JS at page load time
   const LIVE_MODE = JSON.parse(document.getElementById('app-config').dataset.liveMode);
 </script>
-<script src="/static/script.js?v=4"></script>
+<script src="/static/script.js?v=5"></script>
 </body>
 </html>

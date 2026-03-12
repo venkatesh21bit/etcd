@@ -36,3 +36,17 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${SYSTEM1_IP}:5432/${POSTGRES_DB:-etcd_demo}
       LEASE_TTL:    "${LEASE_TTL:-15}"
     restart: unless-stopped
+
+  # ── Python client-3  (also runs on System 2, connects to System 1 remotely) ───
+  client-3:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    container_name: etcd-client-3
+    environment:
+      CLIENT_ID:    client-3
+      ETCD_HOST:    "${SYSTEM1_IP}"
+      ETCD_PORT:    "2379"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${SYSTEM1_IP}:5432/${POSTGRES_DB:-etcd_demo}
+      LEASE_TTL:    "${LEASE_TTL:-15}"
+    restart: unless-stopped
