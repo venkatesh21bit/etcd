@@ -31,18 +31,11 @@ COPY --from=builder /go/bin/goreman /usr/local/bin/goreman
 # Create data directories
 RUN mkdir -p /data/node1 /data/node2 /data/node3
 
-# Goreman Procfile — 3-node cluster on localhost
-# node1 = primary client port (2379)
-# All peer communication stays on localhost (2380, 2382, 2384)
-RUN cat > /Procfile <<'EOF'
-node1: etcd --name node1 --data-dir /data/node1 --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://127.0.0.1:2379 --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls http://127.0.0.1:2380 --initial-cluster node1=http://127.0.0.1:2380,node2=http://127.0.0.1:2382,node3=http://127.0.0.1:2384 --initial-cluster-token etcd-cluster-1 --initial-cluster-state new
-node2: etcd --name node2 --data-dir /data/node2 --listen-client-urls http://0.0.0.0:2381 --advertise-client-urls http://127.0.0.1:2381 --listen-peer-urls http://0.0.0.0:2382 --initial-advertise-peer-urls http://127.0.0.1:2382 --initial-cluster node1=http://127.0.0.1:2380,node2=http://127.0.0.1:2382,node3=http://127.0.0.1:2384 --initial-cluster-token etcd-cluster-1 --initial-cluster-state new
-node3: etcd --name node3 --data-dir /data/node3 --listen-client-urls http://0.0.0.0:2383 --advertise-client-urls http://127.0.0.1:2383 --listen-peer-urls http://0.0.0.0:2384 --initial-advertise-peer-urls http://127.0.0.1:2384 --initial-cluster node1=http://127.0.0.1:2380,node2=http://127.0.0.1:2382,node3=http://127.0.0.1:2384 --initial-cluster-token etcd-cluster-1 --initial-cluster-state new
-EOF
-
-# Startup script — wipes stale data on every restart so --initial-cluster-state new always works
-RUN printf '#!/bin/sh\nrm -rf /data/node1/* /data/node2/* /data/node3/*\nexec goreman -f /Procfile start\n' > /start.sh && \
-    chmod +x /start.sh
+# Copy the entrypoint script (generated at runtime using ADVERTISE_IP so remote
+# clients get the correct advertise-client-url instead of 127.0.0.1).
+# sed strips Windows CRLF line endings in case the file was edited on Windows.
+COPY etcd-entrypoint.sh /start.sh
+RUN sed -i 's/\r//' /start.sh && chmod +x /start.sh
 
 EXPOSE 2379 2381 2383
 

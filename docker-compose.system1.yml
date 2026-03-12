@@ -27,9 +27,13 @@ services:
       dockerfile: Dockerfile.etcd
     container_name: etcd-cluster
     ports:
-      - "2379:2379"   # node1 client port  ← System 2 connects here
+      - "2379:2379"   # node1 client port  ← Systems 2 & 3 connect here
       - "2381:2381"   # node2 client port
       - "2383:2383"   # node3 client port
+    environment:
+      # Machine 1's LAN IP — set SYSTEM1_IP in .env
+      # Needed so remote clients get the correct advertise-client-url from etcd
+      ADVERTISE_IP: "${SYSTEM1_IP:-127.0.0.1}"
     volumes:
       - etcd-data:/data
     restart: unless-stopped
