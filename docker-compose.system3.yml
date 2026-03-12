@@ -1,36 +1,36 @@
 # ═══════════════════════════════════════════════════════════════════════════
-#  docker-compose.system2.yml  –  Run this on MACHINE 2
+#  docker-compose.system3.yml  –  Run this on MACHINE 3
 #
 #  Starts:
-#    • Python client-2 only
+#    • Python client-3 only
 #      Connects to Machine 1's etcd and PostgreSQL over the LAN.
 #
 #  Before starting:
-#    1. Copy .env.system2 to .env
+#    1. Copy .env.system3 to .env
 #    2. Set SYSTEM1_IP= to Machine 1's LAN IP  (e.g. 192.168.1.10)
 #       Run on Machine 1:  ipconfig  (Windows)  or  hostname -I  (Linux)
 #
-#  Copy these files from Machine 1 to Machine 2:
+#  Copy these files from Machine 1 to Machine 3:
 #    client.py  requirements.txt  Dockerfile.client
-#    docker-compose.system2.yml  .env.system2  (rename to .env)
+#    docker-compose.system3.yml  .env.system3  (rename to .env)
 #
 #  Run:
-#    docker compose -f docker-compose.system2.yml up --build -d
-#    docker compose -f docker-compose.system2.yml logs -f
+#    docker compose -f docker-compose.system3.yml up --build -d
+#    docker compose -f docker-compose.system3.yml logs -f
 # ═══════════════════════════════════════════════════════════════════════════
 
 version: "3.9"
 
 services:
 
-  # ── Python client-2  (runs on Machine 2, connects to Machine 1 remotely) ─
-  client-2:
+  # ── Python client-3  (runs on Machine 3, connects to Machine 1 remotely) ─
+  client-3:
     build:
       context: .
       dockerfile: Dockerfile.client
-    container_name: etcd-client-2
+    container_name: etcd-client-3
     environment:
-      CLIENT_ID:    client-2
+      CLIENT_ID:    client-3
       # Point at Machine 1's LAN IP — set SYSTEM1_IP in your .env file
       ETCD_HOST:    "${SYSTEM1_IP}"
       ETCD_PORT:    "2379"
