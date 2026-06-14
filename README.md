@@ -18,7 +18,7 @@ This project demonstrates **leader election and failover** in a distributed setu
 - Includes a visual workflow that makes backend state easy to understand.
 
 ### Architecture Summary
-- `Dockerfile.etcd`: Runs a 3-node etcd cluster in one container using goreman.
+- `Dockerfile.etcd`: Runs a 3-node etcd cluster in one container using goreman (a Procfile-based process manager).
 - `client.py`: Client process that contests `/db/critical_lock`, writes to DB when leader, and watches crash signals.
 - `etcd_state.py`: Live-mode state reader that polls etcd + PostgreSQL and normalizes data for the UI.
 - `simulation.py`: In-memory simulator with the same snapshot shape as live mode.
